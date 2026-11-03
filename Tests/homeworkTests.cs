@@ -115,5 +115,23 @@ namespace APIHandler.Tests.AqaHomework.Tests
             string ownerToken = await _apiClient.SignInAsync(OwnerEmail, OwnerPassword);
             _apiClient.SetAuthToken(ownerToken);
         }
+
+        [Test]
+        [Description("Негативний сценарій: Спроба доступу з токеном іншого користувача (Alien User) має повертати 403 або 401")]
+        public async Task GetGroupSessions_AsAnotherUser_Returns403()
+        {
+            // Імітуємо токен іншого користувача (Alien User), як було у вашому першому файлу
+            _apiClient.SetAuthToken("hwD0z6vUBG67zimkl/LW326LM2KRpWSp9oo9Cmlb9Fw="); 
+
+            var response = await _apiClient.GetGroupSessionResponseAsync(_groupId);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized)
+                .Or.EqualTo(HttpStatusCode.Forbidden));
+
+            // Після тесту відновлюємо токен Власника, щоб інші запуски не ламалися
+            string ownerToken = await _apiClient.SignInAsync(OwnerEmail, OwnerPassword);
+            _apiClient.SetAuthToken(ownerToken);
+        }
+
     }
 }
