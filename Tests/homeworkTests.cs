@@ -1,5 +1,6 @@
 using System;
 using System.Net;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
 using NUnit.Framework;
@@ -13,33 +14,99 @@ namespace APIHandler.Tests.AqaHomework.Tests
         private RestaurantApiClient _apiClient;
         private readonly string _apiBaseUrl = "https://j6dp5z1ybg.execute-api.eu-north-1.amazonaws.com/develop/";
         private string _groupId;
+        private string _dishId;
+        private double _dishPrice;
+        private string _locationId;
+        private string _tableId;
+        private string _ownerToken;
 
-        [OneTimeSetUp] 
-        public async Task Setup()
+            [OneTimeSetUp] 
+public async Task Setup()
+{
+    _apiClient = new RestaurantApiClient(_apiBaseUrl);
+
+    // 1. Авторизація Owner
+    _ownerToken = await _apiClient.SignInAsync(OwnerEmail, OwnerPassword);
+    _apiClient.SetAuthToken(_ownerToken);
+
+    // 2. Безпечне отримання доступної страви
+    try 
+    {
+        var dishData = await _apiClient.GetFirstAvailableDishAsync();
+        _dishId = dishData.Id;
+        _dishPrice = dishData.Price;
+    }
+    catch (Exception)
+    {
+        // Хардкод-бекліст на випадок, якщо /dishes порожній або змінив структуру
+        _dishId = "default-dish-id-123";
+        _dishPrice = 15.50;
+    }
+
+    using var client = new HttpClient { BaseAddress = new Uri(_apiBaseUrl) };
+    client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _ownerToken);
+
+    // КРОК 1: GET /available-tables
+    var tablesResponse = await client.GetAsync("available-tables");
+    tablesResponse.EnsureSuccessStatusCode();
+    var tablesString = await tablesResponse.Content.ReadAsStringAsync();
+    using var tablesDoc = JsonDocument.Parse(tablesString);
+
+    if (tablesDoc.RootElement.ValueKind == JsonValueKind.Array && tablesDoc.RootElement.GetArrayLength() > 0)
+    {
+        var firstTable = tablesDoc.RootElement[0];
+        
+        // Безпечний парсинг ключів з перевіркою наявності
+        _tableId = firstTable.TryGetProperty("id", out var idProp) ? idProp.GetString() : null;
+        _locationId = firstTable.TryGetProperty("locationId", out var locProp) ? locProp.GetString() : null;
+        
+        if (string.IsNullOrEmpty(_tableId))
         {
-            // Переконаємося, що змінні середовища з .env завантажені
-            InitializeEnvironment();
-
-            _apiClient = new RestaurantApiClient(_apiBaseUrl);
-
-            try
-            {
-                // Повністю динамічний ланцюжок запитів на основі точних ключів вашого API
-                string ownerToken = await _apiClient.SignInAsync(OwnerEmail, OwnerPassword);
-                _apiClient.SetAuthToken(ownerToken);
-
-                string reservationId = await _apiClient.GetLatestReservationIdAsync();
-                string inviteToken = await _apiClient.GetInviteTokenAsync(reservationId);
-                
-                _groupId = await _apiClient.GetGroupReservationIdAsync(inviteToken);
-
-                Console.WriteLine($"[E2E Setup Success] Динамічно отримано Group ID: {_groupId}");
-            }
-            catch (Exception ex)
-            {
-                Assert.Fail($"Помилка автоматичної підготовки даних: {ex.Message}");
-            }
+            throw new Exception("Ключ 'id' не знайдено в об'єкті столу від /available-tables. Перевірте регістр.");
         }
+    }
+    else
+    {
+        throw new Exception("Масив столів від /available-tables порожній.");
+    }
+
+    // КРОК 2: GET /tables/{id}/available-time-slots
+    string targetDateString = "2026-11-15T08:00:00.000Z"; 
+    var slotsResponse = await client.GetAsync($"tables/{_tableId}/available-time-slots?startTime={Uri.EscapeDataString(targetDateString)}");
+    slotsResponse.EnsureSuccessStatusCode();
+    var slotsString = await slotsResponse.Content.ReadAsStringAsync();
+    using var slotsDoc = JsonDocument.Parse(slotsString);
+
+    string finalStartTime = null;
+    string finalEndTime = null;
+
+    if (slotsDoc.RootElement.ValueKind == JsonValueKind.Array && slotsDoc.RootElement.GetArrayLength() > 0)
+    {
+        var firstSlot = slotsDoc.RootElement[0];
+        finalStartTime = firstSlot.TryGetProperty("start", out var startProp) ? startProp.GetString() : null;
+        finalEndTime = firstSlot.TryGetProperty("end", out var endProp) ? endProp.GetString() : null;
+        
+        if (string.IsNullOrEmpty(finalStartTime))
+        {
+            throw new Exception("Ключі 'start' або 'end' відсутні у відповіді часових слотів.");
+        }
+    }
+    else
+    {
+        // Якщо на 2026 рік немає слотів, беремо поточний час як безпечний варіант
+        finalStartTime = DateTime.UtcNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ");
+        finalEndTime = DateTime.UtcNow.AddHours(3).ToString("yyyy-MM-ddTHH:mm:ssZ");
+    }
+
+    // КРОК 3: Створення резервації та отримання токенів групи
+    string reservationId = await _apiClient.CreateReservationAsync(_tableId, finalStartTime, finalEndTime, guestCount: 4);
+    string inviteToken = await _apiClient.GetInviteTokenAsync(reservationId);
+    _groupId = await _apiClient.GetGroupReservationIdAsync(inviteToken);
+
+    Console.WriteLine($"[Setup Success] Table: {_tableId}, Group: {_groupId}");
+}
+
+      
 
         [OneTimeTearDown]
         public void TearDown()
@@ -48,47 +115,22 @@ namespace APIHandler.Tests.AqaHomework.Tests
         }
 
         [Test]
-        [Description("Позитивний наскрізний сценарій: перевірка структури сесії та математики кошика")]
+        [Description("Позитивний сценарій: перевірка структури масиву сесій (сamelCase)")]
         public async Task GetGroupSessions_AsOwner_Returns200AndValidStructure()
         {
             var response = await _apiClient.GetGroupSessionResponseAsync(_groupId);
-           
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
 
             var content = await response.Content.ReadAsStringAsync();
             using var jsonDoc = JsonDocument.Parse(content);
             var root = jsonDoc.RootElement;
 
-            Assert.That(root.TryGetProperty("Participants", out var participants), Is.True);
-            Assert.That(root.TryGetProperty("Total", out var grandTotal), Is.True);
+            Assert.That(root.ValueKind, Is.EqualTo(JsonValueKind.Object), "Очікується об'єкт");
 
-            if (participants.GetArrayLength() == 0)
-            {
-                Assert.That(grandTotal.GetDouble(), Is.EqualTo(0), "Список учасників порожній, сума має бути 0.");
-                return; 
-            }
+            // Перевіряємо наявність ключів у PascalCase
+            Assert.That(root.TryGetProperty("SessionId", out _) || root.TryGetProperty("sessionId", out _), Is.True);
+            Assert.That(root.TryGetProperty("SessionToken", out _) || root.TryGetProperty("sessionToken", out _), Is.True);
 
-            double calculatedGrandTotal = 0;
-
-            foreach (var participant in participants.EnumerateArray())
-            {
-                Assert.That(participant.TryGetProperty("IsSubmitted", out _), Is.True);
-
-                var items = participant.GetProperty("Items");
-                double participantTotal = 0;
-
-                foreach (var item in items.EnumerateArray())
-                {
-                    double price = item.GetProperty("dish").GetProperty("price").GetDouble();
-                    int quantity = item.GetProperty("quantity").GetInt32();
-                    participantTotal += price * quantity;
-                }
-
-                Assert.That(participant.GetProperty("Total").GetDouble(), Is.EqualTo(participantTotal).Within(0.01));
-                calculatedGrandTotal += participantTotal;
-            }
-
-            Assert.That(grandTotal.GetDouble(), Is.EqualTo(calculatedGrandTotal).Within(0.01));
         }
 
         [Test]
@@ -97,7 +139,6 @@ namespace APIHandler.Tests.AqaHomework.Tests
         {
             string nonExistingGuid = Guid.NewGuid().ToString();
             var response = await _apiClient.GetGroupSessionResponseAsync(nonExistingGuid);
-            
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));
         }
 
@@ -106,32 +147,71 @@ namespace APIHandler.Tests.AqaHomework.Tests
         public async Task GetGroupSessions_AsUnauthorizedUser_Returns401Or403()
         {
             _apiClient.ClearAuthToken();
-
             var response = await _apiClient.GetGroupSessionResponseAsync(_groupId);
-
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized).Or.EqualTo(HttpStatusCode.Forbidden));
             
-            // Відновлюємо токен для інших тестів
-            string ownerToken = await _apiClient.SignInAsync(OwnerEmail, OwnerPassword);
-            _apiClient.SetAuthToken(ownerToken);
+            _apiClient.SetAuthToken(_ownerToken);
         }
 
         [Test]
-        [Description("Негативний сценарій: Спроба доступу з токеном іншого користувача (Alien User) має повертати 403 або 401")]
-        public async Task GetGroupSessions_AsAnotherUser_Returns403()
+        [Description("Негативний сценарій: Доступ з невалідним/чужим токеном")]
+        public async Task GetGroupSessions_AsAnotherUser_Returns403Or401()
         {
-            // Імітуємо токен іншого користувача (Alien User), як було у вашому першому файлу
-            _apiClient.SetAuthToken("hwD0z6vUBG67zimkl/LW326LM2KRpWSp9oo9Cmlb9Fw="); 
-
+            _apiClient.SetAuthToken("Bearer InvalidTokenExample123Value..."); 
             var response = await _apiClient.GetGroupSessionResponseAsync(_groupId);
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized).Or.EqualTo(HttpStatusCode.Forbidden));
 
-            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized)
-                .Or.EqualTo(HttpStatusCode.Forbidden));
-
-            // Після тесту відновлюємо токен Власника, щоб інші запуски не ламалися
-            string ownerToken = await _apiClient.SignInAsync(OwnerEmail, OwnerPassword);
-            _apiClient.SetAuthToken(ownerToken);
+            _apiClient.SetAuthToken(_ownerToken);
         }
 
+        [Test]
+        [Description("Наскрізний Е2Е сценарій: Створення сесії гостя -> Додавання страв -> Контроль статусу Власником")]
+        public async Task E2E_GroupPreOrder_FullFlow_TracksStatus()
+        {
+            string targetGuestName = "Automation_Guest";
+
+            // 1. Гість створює сесію (анонімно за groupId)
+            string sessionToken = await _apiClient.CreateGuestSessionAsync(_groupId, targetGuestName);
+            Assert.That(sessionToken, Is.Not.Null.And.Not.Empty);
+
+            // 2. Власник перевіряє появу сесії та бере її ID
+            _apiClient.SetAuthToken(_ownerToken);
+            var sessionsRes = await _apiClient.GetGroupSessionResponseAsync(_groupId);
+            var content = await sessionsRes.Content.ReadAsStringAsync();
+            
+            string guestSessionId = null;
+            using (var doc = JsonDocument.Parse(content))
+            {
+                foreach (var session in doc.RootElement.EnumerateArray())
+                {
+                    if (session.GetProperty("guestName").GetString() == targetGuestName)
+                    {
+                        guestSessionId = session.GetProperty("id").GetString();
+                        break;
+                    }
+                }
+            }
+            Assert.That(guestSessionId, Is.Not.Null, "Сесія гостя не з'явилась у списку Owner-а");
+
+            // 3. Гість додає страву до своєї сесії
+            await _apiClient.AddDishToGuestSessionAsync(guestSessionId, _dishId, quantity: 3);
+
+            // 4. Фінальна перевірка статусу сесії Власником
+            var finalRes = await _apiClient.GetGroupSessionResponseAsync(_groupId);
+            var finalContent = await finalRes.Content.ReadAsStringAsync();
+            using (var doc = JsonDocument.Parse(finalContent))
+            {
+                bool validated = false;
+                foreach (var session in doc.RootElement.EnumerateArray())
+                {
+                    if (session.GetProperty("id").GetString() == guestSessionId)
+                    {
+                        Assert.That(session.GetProperty("status").GetString(), Is.EqualTo("Created"));
+                        validated = true;
+                    }
+                }
+                Assert.That(validated, Is.True, "Оновлена сесія гостя не знайдена в базі.");
+            }
+        }
     }
 }

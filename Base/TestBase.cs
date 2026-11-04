@@ -12,7 +12,7 @@ namespace APIHandler.Tests.AqaHomework.Base
         [OneTimeSetUp]
         public void InitializeEnvironment()
         {
-            // Автоматично шукає файл .env у папці проєкту та завантажує змінні
+            // Метод виконається автоматично один раз перед стартом тестів у дочірньому класі
             DotEnv.Load(options: new DotEnvOptions(probeForEnv: true));
 
             OwnerEmail = Environment.GetEnvironmentVariable("OWNER_EMAIL") 
