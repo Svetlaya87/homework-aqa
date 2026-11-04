@@ -199,15 +199,26 @@ namespace APIHandler.Tests.AqaHomework.Tests
             double actualTotal = root.GetProperty("Total").GetDouble();
 
             // 2. ДИНАМІЧНЕ РОЗГАЛУЖЕННЯ: тест підлаштовується під стан системи
-            if (participants.GetArrayLength() == 0)
+              
+            if (participants.ValueKind == JsonValueKind.Array && participants.GetArrayLength() == 0)
             {
+                // Выводим пустой массив в консоль (покажет [])
+                Console.WriteLine($"[DEBUG] Масив participants з сервера: {participants.GetRawText()}");
+                Console.WriteLine($"[DEBUG] Загальна сума total з сервера: {actualTotal}");
+
                 // Сценарій А: Група порожня
+                Assert.That(participants.GetArrayLength(), Is.EqualTo(0), 
+                "В response масив учасників має бути порожнім: 'participants': []");
+            
                 Assert.That(actualTotal, Is.EqualTo(0), 
-                "Група порожня, тому загальна сума 'Total' має бути строго 0");
+                "В response загальна сума має бути нульовою: 'total': 0");
             }
+
             else
             {
                 // Сценарій Б: Група заповнена (лектор запустив тест після додавання гостей)
+
+                Console.WriteLine($"[DEBUG] Повний Response від сервера для заповненої групи:\n{content}");
                 double expectedTotal = 0;
 
                  // Динамічно рахуємо, яка сума МАЄ бути на основі доданих учасників
