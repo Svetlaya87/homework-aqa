@@ -19,40 +19,40 @@ namespace APIHandler.Tests.AqaHomework.Tests
         private string _ownerToken;
 
         [OneTimeSetUp] 
-public async Task Setup()
-{
-    // InitializeEnvironment() видалено - він викликається автоматично в TestBase!
-    _apiClient = new RestaurantApiClient(_apiBaseUrl);
+        public async Task Setup()
+        {
+            // InitializeEnvironment() видалено - він викликається автоматично в TestBase!
+            _apiClient = new RestaurantApiClient(_apiBaseUrl);
 
-    try
-    {
-        // 1. Авторизація Owner
-        _ownerToken = await _apiClient.SignInAsync(OwnerEmail, OwnerPassword);
-        _apiClient.SetAuthToken(_ownerToken); // Токен встановлено для _apiClient
+            try
+            {
+                // 1. Авторизація Owner
+                _ownerToken = await _apiClient.SignInAsync(OwnerEmail, OwnerPassword);
+                _apiClient.SetAuthToken(_ownerToken); // Токен встановлено для _apiClient
 
-        // 2. Отримання доступної страви для тестів
-        var dishData = await _apiClient.GetFirstAvailableDishAsync();
-        _dishId = dishData.Id;
+                // 2. Отримання доступної страви для тестів
+                var dishData = await _apiClient.GetFirstAvailableDishAsync();
+                _dishId = dishData.Id;
 
-        // 3. Пошук вільного столу через клієнт
-        _tableId = await _apiClient.GetFirstAvailableTableAsync();
+                // 3. Пошук вільного столу через клієнт
+                _tableId = await _apiClient.GetFirstAvailableTableAsync();
 
-        // 4. Отримання доступного часового слоту (Динамічна дата замість хардкоду)
-        string targetDateString = DateTime.UtcNow.AddDays(3).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"); 
-        var slot = await _apiClient.GetFirstAvailableSlotAsync(_tableId, targetDateString);
+                // 4. Отримання доступного часового слоту (Динамічна дата замість хардкоду)
+                string targetDateString = DateTime.UtcNow.AddDays(3).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"); 
+                var slot = await _apiClient.GetFirstAvailableSlotAsync(_tableId, targetDateString);
 
-        // 5. Створення чистої тестової групи
-        string reservationId = await _apiClient.CreateReservationAsync(_tableId, slot.Start, slot.End, guestCount: 4);
-        string inviteToken = await _apiClient.GetInviteTokenAsync(reservationId);
-        _groupId = await _apiClient.GetGroupReservationIdAsync(inviteToken);
+                // 5. Створення чистої тестової групи
+                string reservationId = await _apiClient.CreateReservationAsync(_tableId, slot.Start, slot.End, guestCount: 4);
+                string inviteToken = await _apiClient.GetInviteTokenAsync(reservationId);
+                _groupId = await _apiClient.GetGroupReservationIdAsync(inviteToken);
 
-        Console.WriteLine($"[E2E Setup Success] Стіл: {_tableId}, Група ID: {_groupId}");
-    }
-    catch (Exception ex)
-    {
-        Assert.Fail($"Помилка автоматичної підготовки даних: {ex.Message}");
-    }
-}
+                Console.WriteLine($"[E2E Setup Success] Стіл: {_tableId}, Група ID: {_groupId}");
+            }
+            catch (Exception ex)
+            {
+                Assert.Fail($"Помилка автоматичної підготовки даних: {ex.Message}");
+            }
+        }
 
 
         [OneTimeTearDown]
@@ -133,32 +133,52 @@ public async Task Setup()
                 var participants = doc.RootElement.GetProperty("Participants");
                 Assert.That(participants.GetArrayLength(), Is.GreaterThan(0), "Гість має бути в списку Participants");
                 
+                bool guestFound = false;
                 foreach (var participant in participants.EnumerateArray())
                 {
                     if (participant.GetProperty("Name").GetString() == targetGuestName)
                     {
+                        guestFound = true;
                         guestSessionId = participant.GetProperty("Id").GetString();
+                        
+                        // ТОЧНІ ПЕРЕВІРКИ ДЛЯ КРОКУ 2:
+                        // Перевірка 2.1: Учасник без страв має бути в списку із сумою 0
+                        var items = participant.GetProperty("Items");
+                        Assert.That(items.ValueKind, Is.EqualTo(JsonValueKind.Array), "Поле 'Items' гостя має бути масивом");
+                        Assert.That(items.GetArrayLength(), Is.EqualTo(0), "Новий гість не повинен мати страв у кошику");
+                        Assert.That(participant.GetProperty("Total").GetDouble(), Is.EqualTo(0), "Початкова сума нового гостя має бути 0");
+                        
+                        // Перевірка 2.2: Учасник, який ще не підтвердив кошик, має відмітку IsSubmitted = false
+                        Assert.That(participant.GetProperty("IsSubmitted").GetBoolean(), Is.False, 
+                            "Новий гість ще не підтвердив кошик, тому 'IsSubmitted' має бути false");
                         break;
                     }
                 }
+                Assert.That(guestFound, Is.True, $"Гість з ім'ям '{targetGuestName}' не знайдений у списку учасників групи");
             }
 
             // Якщо ID сесії не знайшовся в масиві, використовуємо ID групи як fallback
             if (string.IsNullOrEmpty(guestSessionId)) guestSessionId = _groupId;
 
-            // 3. ВИПРАВЛЕНО: Гість додає страву (2 шт), передаючи ТОКЕН для авторизації
+            // 3. Гість додає страву (2 шт), передаючи ТОКЕН для авторизації
             await _apiClient.AddDishToGuestSessionAsync(guestSessionId, sessionToken, _dishId, quantity: 2);
 
-            // 4. Власник перевіряє оновлення Total
+            // 4. Власник перевіряє точне оновлення математики кошика та загальної суми
             _apiClient.SetAuthToken(_ownerToken);
             var responseAfterAdd = await _apiClient.GetGroupSessionResponseAsync(_groupId);
             var contentAfterAdd = await responseAfterAdd.Content.ReadAsStringAsync();
             using (var doc = JsonDocument.Parse(contentAfterAdd))
             {
-                Assert.That(doc.RootElement.GetProperty("Total").GetDouble(), Is.GreaterThan(0), 
-                    "Загальна сума 'Total' має збільшитись після додавання страви зі спареним токеном.");
-            }
-        }
+                // Рахуємо точну очікувану суму: ціна однієї страви (отримана на Setup) * 2 шт.
+                double expectedTotal = _apiClient.GetFirstAvailableDishAsync().Result.Price * 2; 
+                // Або якщо ви зберегли ціну в окрему змінну класу під час Setup, використовуйте її (наприклад, _dishPrice * 2)
 
+                double actualTotal = doc.RootElement.GetProperty("Total").GetDouble();
+                
+                Assert.That(actualTotal, Is.EqualTo(expectedTotal).Within(0.01), 
+                    $"Загальна сума 'Total' ({actualTotal}) має точно дорівнювати вартості доданих страв ({expectedTotal})");
+            }
+
+        }
     }
 }
