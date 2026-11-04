@@ -146,15 +146,49 @@ namespace APIHandler.Tests.AqaHomework.Services
             throw new KeyNotFoundException("Не знайдено токен сесії гостя.");
         }
 
-        public async Task AddDishToGuestSessionAsync(string guestSessionId, string dishId, int quantity)
+        // ВИПРАВЛЕНО: додано параметр guestSessionToken
+        public async Task AddDishToGuestSessionAsync(string guestSessionId, string guestSessionToken, string dishId, int quantity)
         {
-            using var anonymousClient = new HttpClient { BaseAddress = new Uri(_apiBaseUrl) };
+            using var guestClient = new HttpClient { BaseAddress = new Uri(_apiBaseUrl) };
+            guestClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", guestSessionToken);
+
             var body = new { dishId, quantity };
             var content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
 
-            var response = await anonymousClient.PostAsync($"guest/sessions/{guestSessionId}/dishes", content);
+            var response = await guestClient.PostAsync($"guest/sessions/{guestSessionId}/dishes", content);
             response.EnsureSuccessStatusCode();
         }
+
+        // Додати в RestaurantApiClient.cs
+public async Task<string> GetFirstAvailableTableAsync()
+{
+    var response = await _httpClient.GetAsync("available-tables");
+    response.EnsureSuccessStatusCode();
+    var content = await response.Content.ReadAsStringAsync();
+    using var doc = JsonDocument.Parse(content);
+    
+    if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
+        return doc.RootElement[0].GetProperty("id").GetString();
+        
+    throw new Exception("Не знайдено доступних столів.");
+}
+
+public async Task<(string Start, string End)> GetFirstAvailableSlotAsync(string tableId, string targetDate)
+{
+    var response = await _httpClient.GetAsync($"tables/{tableId}/available-time-slots?startTime={Uri.EscapeDataString(targetDate)}");
+    response.EnsureSuccessStatusCode();
+    var content = await response.Content.ReadAsStringAsync();
+    using var doc = JsonDocument.Parse(content);
+
+    if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
+    {
+        return (doc.RootElement[0].GetProperty("start").GetString(), doc.RootElement[0].GetProperty("end").GetString());
+    }
+    
+    // Фолбек, якщо слотів немає
+    return (DateTime.UtcNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ"), DateTime.UtcNow.AddHours(3).ToString("yyyy-MM-ddTHH:mm:ssZ"));
+}
+
 
         public void Dispose()
         {

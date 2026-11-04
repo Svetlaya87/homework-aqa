@@ -19,70 +19,41 @@ namespace APIHandler.Tests.AqaHomework.Tests
         private string _ownerToken;
 
         [OneTimeSetUp] 
-        public async Task Setup()
-        {
-            InitializeEnvironment();
-            _apiClient = new RestaurantApiClient(_apiBaseUrl);
+public async Task Setup()
+{
+    // InitializeEnvironment() видалено - він викликається автоматично в TestBase!
+    _apiClient = new RestaurantApiClient(_apiBaseUrl);
 
-            try
-            {
-                // 1. Авторизація Owner
-                _ownerToken = await _apiClient.SignInAsync(OwnerEmail, OwnerPassword);
-                _apiClient.SetAuthToken(_ownerToken);
+    try
+    {
+        // 1. Авторизація Owner
+        _ownerToken = await _apiClient.SignInAsync(OwnerEmail, OwnerPassword);
+        _apiClient.SetAuthToken(_ownerToken); // Токен встановлено для _apiClient
 
-                // 2. Отримання доступної страви для тестів
-                var dishData = await _apiClient.GetFirstAvailableDishAsync();
-                _dishId = dishData.Id;
+        // 2. Отримання доступної страви для тестів
+        var dishData = await _apiClient.GetFirstAvailableDishAsync();
+        _dishId = dishData.Id;
 
-                using var client = new HttpClient { BaseAddress = new Uri(_apiBaseUrl) };
-                client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _ownerToken);
+        // 3. Пошук вільного столу через клієнт
+        _tableId = await _apiClient.GetFirstAvailableTableAsync();
 
-                // 3. Пошук вільного столу
-                var tablesResponse = await client.GetAsync("available-tables");
-                tablesResponse.EnsureSuccessStatusCode();
-                var tablesString = await tablesResponse.Content.ReadAsStringAsync();
-                using var tablesDoc = JsonDocument.Parse(tablesString);
+        // 4. Отримання доступного часового слоту (Динамічна дата замість хардкоду)
+        string targetDateString = DateTime.UtcNow.AddDays(3).ToString("yyyy-MM-ddTHH:mm:ss.fffZ"); 
+        var slot = await _apiClient.GetFirstAvailableSlotAsync(_tableId, targetDateString);
 
-                if (tablesDoc.RootElement.ValueKind == JsonValueKind.Array && tablesDoc.RootElement.GetArrayLength() > 0)
-                {
-                    _tableId = tablesDoc.RootElement[0].GetProperty("id").GetString();
-                }
-                else
-                {
-                    throw new Exception("Не знайдено доступних столів для створення нового бронювання.");
-                }
+        // 5. Створення чистої тестової групи
+        string reservationId = await _apiClient.CreateReservationAsync(_tableId, slot.Start, slot.End, guestCount: 4);
+        string inviteToken = await _apiClient.GetInviteTokenAsync(reservationId);
+        _groupId = await _apiClient.GetGroupReservationIdAsync(inviteToken);
 
-                // 4. Отримання доступного часового слоту
-                string targetDateString = "2026-11-15T08:00:00.000Z"; 
-                var slotsResponse = await client.GetAsync($"tables/{_tableId}/available-time-slots?startTime={Uri.EscapeDataString(targetDateString)}");
-                slotsResponse.EnsureSuccessStatusCode();
-                var slotsString = await slotsResponse.Content.ReadAsStringAsync();
-                using var slotsDoc = JsonDocument.Parse(slotsString);
+        Console.WriteLine($"[E2E Setup Success] Стіл: {_tableId}, Група ID: {_groupId}");
+    }
+    catch (Exception ex)
+    {
+        Assert.Fail($"Помилка автоматичної підготовки даних: {ex.Message}");
+    }
+}
 
-                string finalStartTime, finalEndTime;
-                if (slotsDoc.RootElement.ValueKind == JsonValueKind.Array && slotsDoc.RootElement.GetArrayLength() > 0)
-                {
-                    finalStartTime = slotsDoc.RootElement[0].GetProperty("start").GetString();
-                    finalEndTime = slotsDoc.RootElement[0].GetProperty("end").GetString();
-                }
-                else
-                {
-                    finalStartTime = DateTime.UtcNow.AddHours(1).ToString("yyyy-MM-ddTHH:mm:ssZ");
-                    finalEndTime = DateTime.UtcNow.AddHours(3).ToString("yyyy-MM-ddTHH:mm:ssZ");
-                }
-
-                // 5. Створення чистої тестової групи
-                string reservationId = await _apiClient.CreateReservationAsync(_tableId, finalStartTime, finalEndTime, guestCount: 4);
-                string inviteToken = await _apiClient.GetInviteTokenAsync(reservationId);
-                _groupId = await _apiClient.GetGroupReservationIdAsync(inviteToken);
-
-                Console.WriteLine($"[E2E Setup Success] Стіл: {_tableId}, Група ID: {_groupId}");
-            }
-            catch (Exception ex)
-            {
-                Assert.Fail($"Помилка автоматичної підготовки даних: {ex.Message}");
-            }
-        }
 
         [OneTimeTearDown]
         public void TearDown()
@@ -141,7 +112,7 @@ namespace APIHandler.Tests.AqaHomework.Tests
             _apiClient.SetAuthToken(_ownerToken);
         }
 
-        [Test]
+                [Test]
         [Description("Наскрізний сценарій Рівня 1: Додавання страв гостями -> Контроль сум та учасників Власником")]
         public async Task E2E_GroupPreOrder_FullFlow_CalculatesTotalsAndTracksStatus()
         {
@@ -151,7 +122,7 @@ namespace APIHandler.Tests.AqaHomework.Tests
             string sessionToken = await _apiClient.CreateGuestSessionAsync(_groupId, targetGuestName);
             Assert.That(sessionToken, Is.Not.Null.And.Not.Empty);
 
-            // 2. Власник перевіряє появу учасника в списку Participants
+            // 2. Власник перевіряє появу учасника в списку Participants та бере його SessionId
             _apiClient.SetAuthToken(_ownerToken);
             var response = await _apiClient.GetGroupSessionResponseAsync(_groupId);
             var content = await response.Content.ReadAsStringAsync();
@@ -172,19 +143,22 @@ namespace APIHandler.Tests.AqaHomework.Tests
                 }
             }
 
+            // Якщо ID сесії не знайшовся в масиві, використовуємо ID групи як fallback
             if (string.IsNullOrEmpty(guestSessionId)) guestSessionId = _groupId;
 
-            // 3. Гість додає страву (2 шт)
-            await _apiClient.AddDishToGuestSessionAsync(guestSessionId, _dishId, quantity: 2);
+            // 3. ВИПРАВЛЕНО: Гість додає страву (2 шт), передаючи ТОКЕН для авторизації
+            await _apiClient.AddDishToGuestSessionAsync(guestSessionId, sessionToken, _dishId, quantity: 2);
 
             // 4. Власник перевіряє оновлення Total
+            _apiClient.SetAuthToken(_ownerToken);
             var responseAfterAdd = await _apiClient.GetGroupSessionResponseAsync(_groupId);
             var contentAfterAdd = await responseAfterAdd.Content.ReadAsStringAsync();
             using (var doc = JsonDocument.Parse(contentAfterAdd))
             {
                 Assert.That(doc.RootElement.GetProperty("Total").GetDouble(), Is.GreaterThan(0), 
-                    "Загальна сума 'Total' має збільшитись після додавання страви.");
+                    "Загальна сума 'Total' має збільшитись після додавання страви зі спареним токеном.");
             }
         }
+
     }
 }
