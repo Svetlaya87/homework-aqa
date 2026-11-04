@@ -112,7 +112,7 @@ namespace APIHandler.Tests.AqaHomework.Tests
             _apiClient.SetAuthToken(_ownerToken);
         }
 
-                [Test]
+        [Test]
         [Description("Наскрізний сценарій Рівня 1: Додавання страв гостями -> Контроль сум та учасників Власником")]
         public async Task E2E_GroupPreOrder_FullFlow_CalculatesTotalsAndTracksStatus()
         {
@@ -180,5 +180,46 @@ namespace APIHandler.Tests.AqaHomework.Tests
             }
 
         }
+
+        [Test]
+        [Description("Динамічна перевірка: якщо група порожня — очікуємо 0, якщо заповнена — валідуємо математику")]
+        public async Task GetGroupSessions_DynamicCheck_ValidatesBasedOnCurrentState()
+        {
+            _apiClient.SetAuthToken(_ownerToken);
+
+             // 1. Отримуємо поточний стан нашої групи
+            var response = await _apiClient.GetGroupSessionResponseAsync(_groupId);
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+
+            var content = await response.Content.ReadAsStringAsync();
+            using var jsonDoc = JsonDocument.Parse(content);
+            var root = jsonDoc.RootElement;
+
+            var participants = root.GetProperty("Participants");
+            double actualTotal = root.GetProperty("Total").GetDouble();
+
+            // 2. ДИНАМІЧНЕ РОЗГАЛУЖЕННЯ: тест підлаштовується під стан системи
+            if (participants.GetArrayLength() == 0)
+            {
+                // Сценарій А: Група порожня
+                Assert.That(actualTotal, Is.EqualTo(0), 
+                "Група порожня, тому загальна сума 'Total' має бути строго 0");
+            }
+            else
+            {
+                // Сценарій Б: Група заповнена (лектор запустив тест після додавання гостей)
+                double expectedTotal = 0;
+
+                 // Динамічно рахуємо, яка сума МАЄ бути на основі доданих учасників
+                foreach (var participant in participants.EnumerateArray())
+                {
+                    expectedTotal += participant.GetProperty("Total").GetDouble();
+                }
+
+                Assert.That(actualTotal, Is.EqualTo(expectedTotal).Within(0.01), 
+                $"Група заповнена. Загальний Total ({actualTotal}) має дорівнювати сумі по всіх учасниках ({expectedTotal})");
+            }
+        }
+
     }
 }
